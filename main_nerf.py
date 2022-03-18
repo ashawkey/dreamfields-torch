@@ -33,14 +33,15 @@ if __name__ == '__main__':
     parser.add_argument('--gui', action='store_true', help="start a GUI")
     parser.add_argument('--W', type=int, default=800, help="GUI width")
     parser.add_argument('--H', type=int, default=800, help="GUI height")
-    parser.add_argument('--radius', type=float, default=2, help="default GUI camera radius from center")
+    parser.add_argument('--radius', type=float, default=3, help="default GUI camera radius from center")
     parser.add_argument('--fovy', type=float, default=90, help="default GUI camera fovy")
     parser.add_argument('--max_spp', type=int, default=64, help="GUI rendering max sample per pixel")
     ### other options
-    parser.add_argument('--tau_0', type=float, default=0.3, help="target mean transparency 0")
+    parser.add_argument('--tau_0', type=float, default=0.5, help="target mean transparency 0")
     parser.add_argument('--tau_1', type=float, default=0.8, help="target mean transparency 1")
-    parser.add_argument('--tau_step', type=float, default=1000, help="steps to anneal from tau_0 to tau_1")
-    parser.add_argument('--aug_copy', type=int, default=4, help="augmentation copy for each renderred image before feeding into CLIP")
+    parser.add_argument('--tau_step', type=float, default=500, help="steps to anneal from tau_0 to tau_1")
+    parser.add_argument('--aug_copy', type=int, default=8, help="augmentation copy for each renderred image before feeding into CLIP")
+    parser.add_argument('--dir_text', action='store_true', help="direction encoded text prompt")
 
     opt = parser.parse_args()
     print(opt)
@@ -86,7 +87,7 @@ if __name__ == '__main__':
         optimizer = lambda model: torch.optim.Adam([
             {'name': 'encoding', 'params': list(model.encoder.parameters())},
             {'name': 'net', 'params': list(model.sigma_net.parameters()), 'weight_decay': 1e-6},
-        ], lr=1e-3, betas=(0.9, 0.99), eps=1e-15)
+        ], lr=5e-4, betas=(0.9, 0.99), eps=1e-15)
 
         # need different milestones for GUI/CMD mode.
         #scheduler = lambda optimizer: optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, pct_start=0.02, total_steps=10000 if opt.gui else 200)

@@ -52,6 +52,27 @@ def visualize_poses(poses, size=0.1):
 
     trimesh.Scene(objects).show()
 
+
+def get_view_direction(thetas, phis):
+    #                   phis [B,]; thetas: [B,]
+    # front = 0         0-90            
+    # side (left) = 1   90-180
+    # back = 2          180-270
+    # side (right) = 3  270-360
+    # top = 4                        0-45
+    # bottom = 5                     135-180
+    res = np.zeros(phis.shape[0], dtype=np.int64)
+    # first determine by phis
+    res[phis < (np.pi / 2)] = 0
+    res[(phis >= (np.pi / 2)) & (phis < np.pi)] = 1
+    res[(phis >= np.pi) & (phis < (3 * np.pi / 2))] = 2
+    res[(phis >= (3 * np.pi / 2)) & (phis < (2 * np.pi))] = 3
+    # override by thetas
+    res[thetas < (np.pi / 4)] = 4
+    res[thetas > (3 * np.pi / 4)] = 5
+    return res
+
+
 class NeRFDataset(Dataset):
     def __init__(self, type='train', H=800, W=800, radius=2, fovy=90, size=1000):
         super().__init__()
@@ -112,6 +133,10 @@ class NeRFDataset(Dataset):
 
         self.poses = torch.from_numpy(poses).cuda()
 
+        # TODO: classify thetas/phis to explicit directions (front, side, back, top, bottom)
+        self.dirs = get_view_direction(thetas, phis)
+
+
 
     def __getitem__(self, index):
             
@@ -119,9 +144,9 @@ class NeRFDataset(Dataset):
             'pose': self.poses[index],
             'intrinsic': self.intrinsic,
             'index': index,
+            'H': str(self.H),
+            'W': str(self.W),
+            'dir': self.dirs[index],
         }
-    
-        results['H'] = str(self.H)
-        results['W'] = str(self.W)
                 
         return results

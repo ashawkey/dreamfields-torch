@@ -164,7 +164,6 @@ def extract_geometry(bound_min, bound_max, resolution, threshold, query_func):
     return vertices, triangles
 
 
-
 class Trainer(object):
     def __init__(self, 
                  name, # name of this experiment
@@ -217,7 +216,7 @@ class Trainer(object):
         self.model = model
 
         # clip model
-        clip_model, clip_preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
+        clip_model, clip_preprocess = clip.load("ViT-B/16", device=self.device, jit=False)
         clip_model.eval()
         for p in clip_model.parameters():
             p.requires_grad = False
@@ -232,6 +231,8 @@ class Trainer(object):
             T.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
         ])
 
+        self.gaussian_blur = T.GaussianBlur(15, sigma=(0.1, 10))
+
         self.aug_eval = T.Compose([
             T.Resize((224, 224)),
             T.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
@@ -239,8 +240,17 @@ class Trainer(object):
 
 
         # text prompt
-        self.text = clip.tokenize([self.conf["text"]]).to(self.device)
-        self.text_z = self.clip_model.encode_text(self.text)
+        if not self.conf['dir_text']:
+            text = clip.tokenize([self.conf["text"]]).to(self.device)
+            self.text_z = self.clip_model.encode_text(text)
+        else:
+            texts = []
+            for d in ['front', 'side', 'back', 'side', 'top', 'bottom']:
+                text = f"The {d} view of {self.conf['text']}"
+                texts.append(text)
+            texts = clip.tokenize(texts).to(self.device)
+            self.text_z = self.clip_model.encode_text(texts)
+
         # normalize CLIP features
         self.text_z = self.text_z / self.text_z.norm(dim=-1, keepdim=True)
 
@@ -333,6 +343,12 @@ class Trainer(object):
         intrinsics = data["intrinsic"] # [B, 3, 3]
         H, W = int(data['H'][0]), int(data['W'][0]) # get the target size...
 
+        if self.conf['dir_text']:
+            dirs = data['dir'] # [B,]
+            text_z = self.text_z[dirs]
+        else:
+            text_z = self.text_z
+
         B = poses.shape[0]
 
         rays_o, rays_d, _ = get_rays(poses, intrinsics, H, W, -1)
@@ -360,8 +376,7 @@ class Trainer(object):
             bg_color = get_checkerboard(pred_rgb, 8) # checker board random.
 
         # random blur bg
-        gaussian_blur_sigma = random.uniform(0, 10)
-        bg_color = TF.gaussian_blur(bg_color, kernel_size=15, sigma=gaussian_blur_sigma)
+        bg_color = self.gaussian_blur(bg_color)
 
         pred_rgb = pred_rgb + (1 - pred_ws) * bg_color
 
@@ -375,7 +390,7 @@ class Trainer(object):
         image_z = self.clip_model.encode_image(pred_rgb)
         image_z = image_z / image_z.norm(dim=-1, keepdim=True) # normalize features
 
-        loss_clip = - (image_z * self.text_z).sum(-1).mean()
+        loss_clip = - (image_z * text_z).sum(-1).mean()
 
         # transmittance loss
         pred_tr = (1 - pred_ws) * mask_ws # [B, 1, H, W], T = 1 - weights_sum
@@ -390,7 +405,8 @@ class Trainer(object):
         loss_tr = - torch.clamp(mean_tr, max=tau).mean()
         
         # origin loss
-        loss_origin = (outputs['origin'] ** 2).sum()
+        origin_thresh = 0 # self.conf['bound'] * 0.5 ** 2 # if origin is inside sphere(bound/2), no need to further regularize
+        loss_origin = torch.clamp((outputs['origin'] ** 2).sum(), min=origin_thresh)
 
         loss = loss_clip + 0.5 * loss_tr + loss_origin
 

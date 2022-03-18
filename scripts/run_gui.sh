@@ -8,9 +8,11 @@
 # "a tray that has meat and carrots on a table."
 # "a small green vase displays some small yellow blooms."
 # "a high-quality 3d render of a jenga tower"
+# "a slug crawling on the ground around flower petals."
+# "bouquet of flowers sitting in a clear glass vase."
 
 #OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=3 python main_nerf.py "a fox" --workspace trial --cuda_ray --gui
 #OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=3 python main_nerf.py "a rainbow cat" --workspace trial --fp16 --ff --gui --seed 10
 #OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=3 python main_nerf.py "a watermelon with a knife on it" --workspace trial --fp16 --ff --cuda_ray --gui --seed 42
 
-OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=3 python main_nerf.py "a black cat with yellow eyes" --workspace trial --cuda_ray --gui --fp16
+OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=3 python main_nerf.py "a slug crawling on the ground around flower petals." --workspace trial_vase2 --cuda_ray --gui --fp16 --seed 2 #--dir_text
