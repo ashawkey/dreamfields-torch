@@ -1,42 +1,37 @@
-import torch
-import numpytorch as np
-from torch.utils.data import Dataset
+import os
+import cv2
+import glob
+import json
+import tqdm
+import numpy as np
+from scipy.spatial.transform import Slerp, Rotation
 
 import trimesh
 
-def normalize(vectors):
-    return vectors / (np.linalg.norm(vectors, axis=-1, keepdims=True) + 1e-10)
+import torch
+from torch.utils.data import DataLoader
 
-"""
-	const float axis_size = 0.025f;
-	const Vector3f *xforms = (const Vector3f*)&xform;
-	Vector3f pos = xforms[3];
-	add_debug_line(world2proj, list, pos, pos+axis_size*xforms[0], 0xff4040ff);
-	add_debug_line(world2proj, list, pos, pos+axis_size*xforms[1], 0xff40ff40);
-	add_debug_line(world2proj, list, pos, pos+axis_size*xforms[2], 0xffff4040);
-	float xs=axis_size*aspect;
-	float ys=axis_size;
-	float zs=axis_size*2.f*aspect;
-	Vector3f a = pos + xs * xforms[0] + ys * xforms[1] + zs * xforms[2];
-	Vector3f b = pos - xs * xforms[0] + ys * xforms[1] + zs * xforms[2];
-	Vector3f c = pos - xs * xforms[0] - ys * xforms[1] + zs * xforms[2];
-	Vector3f d = pos + xs * xforms[0] - ys * xforms[1] + zs * xforms[2];
-	add_debug_line(world2proj, list, pos, a, col);
-	add_debug_line(world2proj, list, pos, b, col);
-	add_debug_line(world2proj, list, pos, c, col);
-	add_debug_line(world2proj, list, pos, d, col);
-	add_debug_line(world2proj, list, a, b, col);
-	add_debug_line(world2proj, list, b, c, col);
-	add_debug_line(world2proj, list, c, d, col);
-	add_debug_line(world2proj, list, d, a, col);
-"""
+from .utils import get_rays
+
+
+# ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
+def nerf_matrix_to_ngp(pose, scale=0.33):
+    # for the fox dataset, 0.33 scales camera radius to ~ 2
+    new_pose = np.array([
+        [pose[1, 0], -pose[1, 1], -pose[1, 2], pose[1, 3] * scale],
+        [pose[2, 0], -pose[2, 1], -pose[2, 2], pose[2, 3] * scale],
+        [pose[0, 0], -pose[0, 1], -pose[0, 2], pose[0, 3] * scale],
+        [0, 0, 0, 1],
+    ], dtype=np.float32)
+    return new_pose
 
 
 def visualize_poses(poses, size=0.1):
     # poses: [B, 4, 4]
 
     axes = trimesh.creation.axis(axis_length=4)
-    objects = [axes]
+    sphere = trimesh.creation.icosphere(radius=1)
+    objects = [axes, sphere]
 
     for pose in poses:
         # a camera is visualized with 8 line segments.
@@ -51,7 +46,6 @@ def visualize_poses(poses, size=0.1):
         objects.append(segs)
 
     trimesh.Scene(objects).show()
-
 
 def get_view_direction(thetas, phis):
     #                   phis [B,]; thetas: [B,]
@@ -73,80 +67,86 @@ def get_view_direction(thetas, phis):
     return res
 
 
-class NeRFDataset(Dataset):
-    def __init__(self, type='train', H=800, W=800, radius=2, fovy=90, size=1000):
-        super().__init__()
+def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_range=[0, 2*np.pi]):
+    ''' generate random poses from an orbit camera
+    Args:
+        size: batch size of generated poses.
+        device: where to allocate the output.
+        radius: camera radius
+        theta_range: [min, max], should be in [0, \pi]
+        phi_range: [min, max], should be in [0, 2\pi]
+    Return:
+        poses: [size, 4, 4]
+    '''
+    
+    def normalize(vectors):
+        return vectors / (torch.norm(vectors, dim=-1, keepdim=True) + 1e-10)
 
+    thetas = torch.rand(size, device=device) * (theta_range[1] - theta_range[0]) + theta_range[0]
+    phis = torch.rand(size, device=device) * (phi_range[1] - phi_range[0]) + phi_range[0]
+
+    centers = torch.stack([
+        radius * torch.sin(thetas) * torch.sin(phis),
+        radius * torch.cos(thetas),
+        radius * torch.sin(thetas) * torch.cos(phis),
+    ], dim=-1) # [B, 3]
+
+    # lookat
+    forward_vector = - normalize(centers)
+    up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0).repeat(size, 1) # confused at the coordinate system...
+    right_vector = normalize(torch.cross(forward_vector, up_vector, dim=-1))
+    up_vector = normalize(torch.cross(right_vector, forward_vector, dim=-1))
+
+    poses = torch.eye(4, dtype=torch.float, device=device).unsqueeze(0).repeat(size, 1, 1)
+    poses[:, :3, :3] = torch.stack((right_vector, up_vector, forward_vector), dim=-1)
+    poses[:, :3, 3] = centers
+
+    return poses
+
+
+class NeRFDataset:
+    def __init__(self, opt, device, type='train', H=128, W=128, radius=2, fovy=90, size=100):
+        super().__init__()
+        
+        self.opt = opt
+        self.device = device
         self.type = type # train, val, test
-        self.size = size
-        self.radius = radius
+
 
         self.H = H
         self.W = W
+        self.radius = radius
+        self.fovy = fovy
+        self.size = size
 
-        # TODO: for type = test or val, should fix the sampled cameras? (e.g. 360 deg rot)
-
-        # intrinsics
-        self.fovy = np.radians(fovy) 
+        self.training = self.type in ['train', 'all']
+        self.num_rays = self.opt.num_rays if self.training else -1
 
         fl_y = self.H / (2 * np.tan(self.fovy / 2))
         fl_x = fl_y
         cx = self.H / 2
         cy = self.W / 2
-
-        self.intrinsic = np.eye(3, dtype=np.float32)
-        self.intrinsic[0, 0] = fl_x
-        self.intrinsic[1, 1] = fl_y
-        self.intrinsic[0, 2] = cx
-        self.intrinsic[1, 2] = cy
-
-        # preload
-        self.intrinsic = torch.from_numpy(self.intrinsic).cuda()
-        self.generate_poses()
-
-    def __len__(self):
-        return self.size
-
-    def generate_poses(self):
-        # generate random poses in batch
-
-        #thetas = np.rand(self.size) * np.pi
-        thetas = np.rand(self.size) * np.pi / 3 + np.pi / 3 # limit elevation
-        phis = np.rand(self.size) * 2 * np.pi
-
-        centers = np.stack([
-            self.radius * np.sin(thetas) * np.sin(phis),
-            self.radius * np.cos(thetas),
-            self.radius * np.sin(thetas) * np.cos(phis),
-        ], axis=-1) # [B, 3]
-
-        forward_vector = - normalize(centers) # camera direction (OpenGL convention!)
-        up_vector = np.array([0, 1, 0], dtype=np.float32).unsqueeze(0).torch_repeat(self.size, 1)
-        right_vector = normalize(np.cross(forward_vector, up_vector, axis=-1))
-        up_vector = normalize(np.cross(right_vector, forward_vector, axis=-1))
-
-        poses = np.eye(4, dtype=np.float32).unsqueeze(0).torch_repeat(self.size, 1, 1)
-        poses[:, :3, :3] = np.stack((right_vector, up_vector, forward_vector), axis=-1)
-        poses[:, :3, 3] = centers
-
-        #visualize_poses(poses)
-
-        self.poses = torch.from_numpy(poses).cuda()
-
-        # TODO: classify thetas/phis to explicit directions (front, side, back, top, bottom)
-        self.dirs = get_view_direction(thetas, phis)
+        self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
 
+    def collate(self, index):
 
-    def __getitem__(self, index):
-            
-        results = {
-            'pose': self.poses[index],
-            'intrinsic': self.intrinsic,
-            'index': index,
-            'H': str(self.H),
-            'W': str(self.W),
-            'dir': self.dirs[index],
+        B = len(index) # always 1
+
+        # random pose
+        poses = rand_poses(B, self.device, radius=self.radius)
+
+        # sample a low-resolution but full image for CLIP
+        rays = get_rays(poses, self.intrinsics, self.H, self.W, -1)
+
+        return {
+            'H': self.H,
+            'W': self.W,
+            'rays_o': rays['rays_o'],
+            'rays_d': rays['rays_d'],    
         }
-                
-        return results
+
+    def dataloader(self):
+        loader = DataLoader(list(range(self.size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
+        loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
+        return loader

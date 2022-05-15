@@ -1,10 +1,9 @@
+import math
 import torch
-import argparse
 import numpy as np
 import dearpygui.dearpygui as dpg
 from scipy.spatial.transform import Rotation as R
 
-from nerf.provider import NeRFDataset
 from nerf.utils import *
 
 
@@ -15,7 +14,7 @@ class OrbitCamera:
         self.radius = r # camera distance from center
         self.fovy = fovy # in degree
         self.center = np.array([0, 0, 0], dtype=np.float32) # look at this point
-        self.rot = R.from_quat([0, 0, 0, 1]) # init camera matrix: [[1, 0, 0], [0, -1, 0], [0, 0, 1]] (to suit ngp convention)
+        self.rot = R.from_quat([1, 0, 0, 0]) # init camera matrix: [[1, 0, 0], [0, -1, 0], [0, 0, 1]] (to suit ngp convention)
         self.up = np.array([0, 1, 0], dtype=np.float32) # need to be normalized!
 
     # pose
@@ -35,17 +34,13 @@ class OrbitCamera:
     # intrinsics
     @property
     def intrinsics(self):
-        res = np.eye(3, dtype=np.float32)
         focal = self.H / (2 * np.tan(np.radians(self.fovy) / 2))
-        res[0, 0] = res[1, 1] = focal
-        res[0, 2] = self.W // 2
-        res[1, 2] = self.H // 2
-        return res
+        return np.array([focal, focal, self.W // 2, self.H // 2])
     
     def orbit(self, dx, dy):
         # rotate along camera up/side axis!
-        side = self.rot.as_matrix()[:3, 0] # the right_vector
-        rotvec_x = self.up * np.radians(0.1 * dx)
+        side = self.rot.as_matrix()[:3, 0] # why this is side --> ? # already normalized.
+        rotvec_x = self.up * np.radians(-0.1 * dx)
         rotvec_y = side * np.radians(-0.1 * dy)
         self.rot = R.from_rotvec(rotvec_x) * R.from_rotvec(rotvec_y) * self.rot
 
@@ -66,19 +61,23 @@ class OrbitCamera:
 
 class NeRFGUI:
     def __init__(self, opt, trainer, debug=True):
-        self.opt = opt
+        self.opt = opt # shared with the trainer's opt to support in-place modification of rendering parameters.
         self.W = opt.W
         self.H = opt.H
         self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
         self.trainer = trainer
         self.debug = debug
-        self.bg_color = None # rendering bg color (TODO)
+        self.bg_color = None
         self.training = False
         self.step = 0 # training step 
 
         self.render_buffer = np.zeros((self.W, self.H, 3), dtype=np.float32)
         self.need_update = True # camera moved, should reset accumulation
         self.spp = 1 # sample per pixel
+
+        self.dynamic_resolution = True
+        self.downscale = 1
+        self.train_steps = 16
 
         dpg.create_context()
         self.register_dpg()
@@ -94,33 +93,47 @@ class NeRFGUI:
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         starter.record()
 
-        outputs = self.trainer.train_gui(self.trainer.train_loader)
+        outputs = self.trainer.train_gui(self.trainer.train_loader, step=self.train_steps)
 
         ender.record()
         torch.cuda.synchronize()
         t = starter.elapsed_time(ender)
 
-        self.step += 1
+        self.step += self.train_steps
         self.need_update = True
 
         dpg.set_value("_log_train_time", f'{t:.4f}ms')
-        dpg.set_value("_log_train_log", f'step = {self.step: 5d}, loss = {outputs["loss"]:.4f}, lr = {outputs["lr"]:.6f}')
+        dpg.set_value("_log_train_log", f'step = {self.step: 5d} (+{self.train_steps: 2d}), loss = {outputs["loss"]:.4f}, lr = {outputs["lr"]:.5f}')
+
+        # dynamic train steps
+        # max allowed train time per-frame is 500 ms
+        full_t = t / self.train_steps * 16
+        train_steps = min(16, max(4, int(16 * 500 / full_t)))
+        if train_steps > self.train_steps * 1.2 or train_steps < self.train_steps * 0.8:
+            self.train_steps = train_steps
 
     
     def test_step(self):
         # TODO: seems we have to move data from GPU --> CPU --> GPU?
-        # TODO: dynamic rendering resolution to keep it fluent.
 
         if self.need_update or self.spp < self.opt.max_spp:
         
             starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             starter.record()
 
-            outputs = self.trainer.test_gui(self.cam.pose, self.cam.intrinsics, self.W, self.H, self.bg_color, self.spp)
+            outputs = self.trainer.test_gui(self.cam.pose, self.cam.intrinsics, self.W, self.H, self.bg_color, self.spp, self.downscale)
 
             ender.record()
             torch.cuda.synchronize()
             t = starter.elapsed_time(ender)
+
+            # update dynamic resolution
+            if self.dynamic_resolution:
+                # max allowed infer time per-frame is 200 ms
+                full_t = t / (self.downscale ** 2)
+                downscale = min(1, max(1/4, math.sqrt(200 / full_t)))
+                if downscale > self.downscale * 1.2 or downscale < self.downscale * 0.8:
+                    self.downscale = downscale
 
             if self.need_update:
                 self.render_buffer = outputs['image']
@@ -131,6 +144,7 @@ class NeRFGUI:
                 self.spp += 1
 
             dpg.set_value("_log_infer_time", f'{t:.4f}ms')
+            dpg.set_value("_log_resolution", f'{int(self.downscale * self.W)}x{int(self.downscale * self.H)}')
             dpg.set_value("_log_spp", self.spp)
             dpg.set_value("_texture", self.render_buffer)
 
@@ -144,17 +158,22 @@ class NeRFGUI:
 
         ### register window
 
+        # the rendered image, as the primary window
         with dpg.window(tag="_primary_window", width=self.W, height=self.H):
+
+            # add the texture
             dpg.add_image("_texture")
 
         dpg.set_primary_window("_primary_window", True)
 
-
-
-        with dpg.window(label="Control", tag="_control_window", width=400, height=250):
+        # control window
+        with dpg.window(label="Control", tag="_control_window", width=400, height=300):
 
             # text prompt
-            dpg.add_text("text: " + self.opt.text, tag="_log_prompt")
+            if self.opt.text is not None:
+                dpg.add_text("text: " + self.opt.text, tag="_log_prompt_text")
+            if self.opt.image is not None:
+                dpg.add_text("ref image: " + self.opt.image, tag="_log_prompt_image")
 
             # button theme
             with dpg.theme() as theme_button:
@@ -215,23 +234,49 @@ class NeRFGUI:
 
                         def callback_save(sender, app_data):
                             self.trainer.save_checkpoint(full=True, best=False)
-                            self.trainer.epoch += 1 # use epoch to indicate different calls.
                             dpg.set_value("_log_ckpt", "saved " + os.path.basename(self.trainer.stats["checkpoints"][-1]))
+                            self.trainer.epoch += 1 # use epoch to indicate different calls.
 
                         dpg.add_button(label="save", tag="_button_save", callback=callback_save)
                         dpg.bind_item_theme("_button_save", theme_button)
 
                         dpg.add_text("", tag="_log_ckpt")
 
+                    # save mesh
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Marching Cubes: ")
+
+                        def callback_mesh(sender, app_data):
+                            self.trainer.save_mesh(resolution=256, threshold=10)
+                            dpg.set_value("_log_mesh", "saved " + f'{self.trainer.name}_{self.trainer.epoch}.ply')
+                            self.trainer.epoch += 1 # use epoch to indicate different calls.
+
+                        dpg.add_button(label="mesh", tag="_button_mesh", callback=callback_mesh)
+                        dpg.bind_item_theme("_button_mesh", theme_button)
+
+                        dpg.add_text("", tag="_log_mesh")                        
 
                     with dpg.group(horizontal=True):
-                        dpg.add_text("Log: ")
                         dpg.add_text("", tag="_log_train_log")
 
             
-            
             # rendering options
-            with dpg.collapsing_header(label="Options"):
+            with dpg.collapsing_header(label="Options", default_open=True):
+
+                # dynamic rendering resolution
+                with dpg.group(horizontal=True):
+
+                    def callback_set_dynamic_resolution(sender, app_data):
+                        if self.dynamic_resolution:
+                            self.dynamic_resolution = False
+                            self.downscale = 1
+                        else:
+                            self.dynamic_resolution = True
+                        self.need_update = True
+
+                    dpg.add_checkbox(label="dynamic resolution", default_value=self.dynamic_resolution, callback=callback_set_dynamic_resolution)
+                    dpg.add_text(f"{self.W}x{self.H}", tag="_log_resolution")
+
                 # bg_color picker
                 def callback_change_bg(sender, app_data):
                     self.bg_color = torch.tensor(app_data[:3], dtype=torch.float32) # only need RGB in [0, 1]
@@ -245,6 +290,39 @@ class NeRFGUI:
                     self.need_update = True
 
                 dpg.add_slider_int(label="FoV (vertical)", min_value=1, max_value=120, format="%d deg", default_value=self.cam.fovy, callback=callback_set_fovy)
+
+                # dt_gamma slider
+                def callback_set_dt_gamma(sender, app_data):
+                    self.opt.dt_gamma = app_data
+                    self.need_update = True
+
+                dpg.add_slider_float(label="dt_gamma", min_value=0, max_value=0.1, format="%.5f", default_value=self.opt.dt_gamma, callback=callback_set_dt_gamma)
+
+                # aabb slider
+                def callback_set_aabb(sender, app_data, user_data):
+                    # user_data is the dimension for aabb (xmin, ymin, zmin, xmax, ymax, zmax)
+                    self.trainer.model.aabb_infer[user_data] = app_data
+
+                    # also change train aabb ? [better not...]
+                    #self.trainer.model.aabb_train[user_data] = app_data
+
+                    self.need_update = True
+
+                dpg.add_separator()
+                dpg.add_text("Axis-aligned bounding box:")
+
+                with dpg.group(horizontal=True):
+                    dpg.add_slider_float(label="x", width=150, min_value=-self.opt.bound, max_value=0, format="%.2f", default_value=-self.opt.bound, callback=callback_set_aabb, user_data=0)
+                    dpg.add_slider_float(label="", width=150, min_value=0, max_value=self.opt.bound, format="%.2f", default_value=self.opt.bound, callback=callback_set_aabb, user_data=3)
+
+                with dpg.group(horizontal=True):
+                    dpg.add_slider_float(label="y", width=150, min_value=-self.opt.bound, max_value=0, format="%.2f", default_value=-self.opt.bound, callback=callback_set_aabb, user_data=1)
+                    dpg.add_slider_float(label="", width=150, min_value=0, max_value=self.opt.bound, format="%.2f", default_value=self.opt.bound, callback=callback_set_aabb, user_data=4)
+
+                with dpg.group(horizontal=True):
+                    dpg.add_slider_float(label="z", width=150, min_value=-self.opt.bound, max_value=0, format="%.2f", default_value=-self.opt.bound, callback=callback_set_aabb, user_data=2)
+                    dpg.add_slider_float(label="", width=150, min_value=0, max_value=self.opt.bound, format="%.2f", default_value=self.opt.bound, callback=callback_set_aabb, user_data=5)
+                
 
             # debug info
             if self.debug:
