@@ -1,6 +1,9 @@
-__pycache__
+__pycache__/
+build/
+*.egg-info/
+*.so
+
 tmp*
 data/
 trial*/
-volsdf/
-**volsdf*
+.vs/
