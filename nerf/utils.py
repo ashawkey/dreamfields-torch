@@ -252,7 +252,7 @@ class Trainer(object):
         self.model = model
 
         # clip model
-        clip_model, clip_preprocess = clip.load("ViT-B/16", device=self.device, jit=False)
+        clip_model, clip_preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
         clip_model.eval()
         for p in clip_model.parameters():
             p.requires_grad = False
@@ -470,6 +470,7 @@ class Trainer(object):
         loss_origin = torch.clamp((outputs['origin'] ** 2).sum(), min=origin_thresh)
 
         loss = loss_clip + 0.5 * loss_tr + loss_origin
+        #loss = loss_clip + 0.25 * loss_tr
 
         #print('[DEBUG]', loss_clip.item(), mean_tr.item(), loss_origin.item())
 
@@ -645,6 +646,7 @@ class Trainer(object):
             except StopIteration:
                 loader = iter(train_loader)
                 data = next(loader)
+
             # update grid every 16 steps
             if self.model.cuda_ray and self.global_step % 16 == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
@@ -872,8 +874,6 @@ class Trainer(object):
 
                     #self.log(f"==> Saving validation image to {save_path}")
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-                    print(preds[0].shape)
 
                     cv2.imwrite(save_path, cv2.cvtColor((preds[0].detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
                     cv2.imwrite(save_path_depth, (preds_depth[0].detach().cpu().numpy()[0] * 255).astype(np.uint8))

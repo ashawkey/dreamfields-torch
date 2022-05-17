@@ -67,7 +67,7 @@ def get_view_direction(thetas, phis):
     return res
 
 
-def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_range=[0, 2*np.pi]):
+def rand_poses(size, device, radius=1, theta_range=[np.pi/3, np.pi/3], phi_range=[0, 2*np.pi]):
     ''' generate random poses from an orbit camera
     Args:
         size: batch size of generated poses.
@@ -105,13 +105,12 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', H=128, W=128, radius=2, fovy=90, size=100):
+    def __init__(self, opt, device, type='train', H=128, W=128, radius=3, fovy=90, size=100):
         super().__init__()
         
         self.opt = opt
         self.device = device
         self.type = type # train, val, test
-
 
         self.H = H
         self.W = W
@@ -122,11 +121,15 @@ class NeRFDataset:
         self.training = self.type in ['train', 'all']
         self.num_rays = self.opt.num_rays if self.training else -1
 
-        fl_y = self.H / (2 * np.tan(self.fovy / 2))
+        fl_y = self.H / (2 * np.tan(np.radians(self.fovy) / 2))
         fl_x = fl_y
         cx = self.H / 2
         cy = self.W / 2
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
+
+        # [debug] visualize poses
+        #poses = rand_poses(100, 'cpu', radius=self.radius).detach().numpy()
+        #visualize_poses(poses)
 
 
     def collate(self, index):
