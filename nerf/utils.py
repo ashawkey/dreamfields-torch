@@ -252,7 +252,7 @@ class Trainer(object):
         self.model = model
 
         # clip model
-        clip_model, clip_preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
+        clip_model, clip_preprocess = clip.load("ViT-B/16", device=self.device, jit=False)
         clip_model.eval()
         for p in clip_model.parameters():
             p.requires_grad = False
@@ -496,10 +496,23 @@ class Trainer(object):
         pred_rgb_aug = self.aug_eval(pred_rgb)
 
         # clip loss
+        loss_clip = 0
+
         image_z = self.clip_model.encode_image(pred_rgb_aug)
         image_z = image_z / image_z.norm(dim=-1, keepdim=True) # normalize features
 
-        loss_clip = - (image_z * self.text_z).sum(-1).mean()
+        if self.text_z is not None:
+            if self.opt.dir_text:
+                dirs = data['dir'] # [B,]
+                text_z = self.text_z[dirs]
+            else:
+                text_z = self.text_z
+
+            loss_clip = loss_clip - (image_z * text_z).sum(-1).mean()
+
+        if self.ref_image_z is not None:
+            loss_clip = loss_clip - (image_z * self.ref_image_z).sum(-1).mean()
+
 
         # transmittance loss
         pred_tr = (1 - pred_ws) * mask_ws # [B, 1, H, W], T = 1 - weights_sum

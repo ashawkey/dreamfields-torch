@@ -10,7 +10,7 @@ class NeRFNetwork(NeRFRenderer):
     def __init__(self,
                  encoding="frequency",
                  num_layers=6,
-                 hidden_dim=64,
+                 hidden_dim=128,
                  bound=1,
                  **kwargs,
                  ):

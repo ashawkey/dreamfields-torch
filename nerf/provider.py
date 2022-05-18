@@ -67,7 +67,7 @@ def get_view_direction(thetas, phis):
     return res
 
 
-def rand_poses(size, device, radius=1, theta_range=[np.pi/3, np.pi/3], phi_range=[0, 2*np.pi]):
+def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2 * np.pi/3], phi_range=[0, 2*np.pi]):
     ''' generate random poses from an orbit camera
     Args:
         size: batch size of generated poses.
