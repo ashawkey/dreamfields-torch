@@ -11,8 +11,8 @@ https://user-images.githubusercontent.com/25863658/158593558-a52fe215-4276-41eb-
 The code framework is based on [torch-ngp](https://github.com/ashawkey/torch-ngp).
 
 ```bash
-git clone --recursive https://github.com/ashawkey/torch-ngp.git
-cd torch-ngp
+git clone https://github.com/ashawkey/dreamfields-torch.git
+cd dreamfields-torch
 ```
 
 ### Install with pip
