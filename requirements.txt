@@ -12,4 +12,5 @@ PyMCubes
 rich
 pysdf
 dearpygui
+scipy
 git+https://github.com/openai/CLIP.git
